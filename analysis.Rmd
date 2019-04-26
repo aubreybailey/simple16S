@@ -1,0 +1,171 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+It's really hard to find a 16S dataset that has duplicates or triplicates!
+In response to this article, and the release of magicBLAST I decided to see what I could do with an RNASeq style analysis, mapping 16S tags as if they were RNA transcripts and then quantifying with DESeq2 to regress out the inter-sample variablity. My results were surprisingly straightforward, especially considering that I eschew the concept of an OTU entirely since magicblast is so damn fast and provides the benefit of taxonomic assignment in the process. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#These are the packages you need for the analysis in R
+```{r}
+library(tidyverse)
+#library(plyr)
+library(rentrez)
+library(data.table)
+library(vegan)
+library(FactoMineR)
+library(taxonomizr)
+
+# taxman v4 reference trimmer could make this a little more specific. we just grab NCBI
+#http://zeus.few.vu.nl/jobs/5ffe61da0ed0e4508d2bc9882894d777/
+# install.packages(c("BiocManager", "tidyverse", "rentrez", "data.table", "vegan", "FactoMineR", "GUniFrac", "taxonomizr"))
+# BiocManager::install(c("biomformat", "phyloseq","metacoder" ))
+# taxonomizr::getNamesAndNodes()
+# read.accession2taxid(list.files('.','accession2taxid.gz$'),'accessionTaxa.sql')
+#https://github.com/darcyabjones/gi-to-tax
+```
+#Read the table from Magic-BLAST (The file is provided in this repository)
+```{r}
+#https://forum.qiime2.org/t/the-effect-of-duplicate-and-triplicate-samples-in-16s-downstream-analysis/7029/5
+#https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5409056/
+mapping <- read.delim("SraRunTable.txt", sep = "\t")
+#tab=read.table("SRR5345378.txt.gz",header=F)
+
+files <- file.path(path = "data_files", dir(path = "data_files", pattern = "*.txt.gz"))
+```
+
+```{r}
+adf <- read.delim("~/Downloads/taxmap_slv_ssu_ref_nr_128.txt")
+# library(metacoder)
+# adf <- metacoder::parse_silva_fasta(file = "./silva_v4.fasta",include_seqs = F)
+```
+
+
+```{r message=FALSE}
+data <- files %>%
+  map(read_tsv, skip=3, col_names = F) %>%    # read in all the files individually, using
+                       # the function read_csv() from the readr package
+  reduce(rbind)
+tab=data
+```
+
+#Here we are changing the column names
+```{r}
+col_names=c("query.acc","reference.acc","pct.identity","not.used1","not.used2",
+            "not.used3","query.start","query.end","reference.start","reference.end","not.used4",
+            "not.used5","score","query.strand","reference.strand","query.length","BTOP",
+            "num.placements","not.used6","compartment","left.overhang","right.overhang",
+            "mate.reference","mate.ref..start","composite.score")
+colnames(tab)=col_names
+tab$SRA=sub("\\..*","",tab$query.acc) #now we can join mapping!
+#tab %>% select_if(!grepl("not.used",names(.)))
+tab <- tab %>% select(SRA, query.acc, reference.acc, score, composite.score, pct.identity, query.start, query.end, num.placements, compartment )
+```
+
+#Since some hits are very short (20 bases) and some long (100), it is up to you to decide if you want to remove the short ones
+```{r}
+tab$length=abs(tab$query.start-tab$query.end)
+tab=tab[tab$length>=50,]
+```
+
+#Also, this to filter the identity percentage for the hits, this is up to you
+```{r}
+tab <- tab %>% filter(tab$pct.identity >= 90)
+```
+
+#To count how many hits per SRA
+```{r}
+#df <- tab %>% group_by( c('SRA','reference.acc.')) %>% summarize(n())
+tab %>% group_by(reference.acc)%>% tally() %>% arrange(desc(n))
+```
+
+```{r}
+tab.temp <- tab %>% select(SRA, query.acc, reference.acc) 
+# tab.temp %>% spread(count(., query.acc, reference.acc), reference.acc, n, fill = 0)
+
+cts <- dcast(setDT(tab.temp), reference.acc~SRA, length) %>% column_to_rownames("reference.acc") %>% as.matrix()
+test <- rowSums(cts) %>% as.data.frame()
+
+test <- dplyr::left_join(cts, adf, by=c("reference.acc" = "taxid"))
+test$organism_name
+# dists <- dist(cts)
+# cmdscale(dists)
+test <- vegan::rarecurve(t(cts), step = 20, )
+#ggrarecurve
+```
+
+#If you want to save the cleaned table
+```{r}
+write.table(cts, file = "tablects.tsv", sep="\t")
+```
+
+```{r}
+library(DESeq2)
+#BiocManager::install("DESeq2")
+coldata <- mapping %>% column_to_rownames("Run")
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+
+dsHTSeq <- DESeqDataSetFromMatrix(countData = cts,
+                                       colData = coldata,
+                                       design= ~ Field.location+planting_status)
+collapsed_dsHTSeq <- collapseReplicates(dsHTSeq, groupby = dsHTSeq$collapsed_name)
+#colData(collapsed_dsHTSeq)
+dds <- DESeq(collapsed_dsHTSeq)
+vst <- varianceStabilizingTransformation(dds)
+res <- results(dds)
+resDF <- as.data.frame(res)
+
+DESeq2::plotPCA(vst, intgroup=c("Field.location", "planting_status"))
+DESeq2::plotCounts(dds, "gi|961555160", intgroup=c("Field.location", "planting_status"))
+```
+
+
+
+
+
+
+
+
+
+
+#To normalize the counts based on the size of SRA, this is a function for retrieving the size of SRA in MBS (developed by Jose)
+```{r}
+getSize <- function(ids) {size_mega <- c()
+  for(i in ids) {term =  paste0(i, "[ACCN]")
+    run = entrez_search(db = "sra", term = term)
+    exp_descrip = entrez_summary(db = "sra", id = run[[1]])
+    x = exp_descrip$run
+    size = substr(x, start = regexpr("total_bases=", x)[[1]][1] + 
+    attr(regexpr("total_bases=", x), "match.length"),
+    stop = regexpr(" load_done", x)[[1]][1])
+    size = gsub('\"', "", size, fixed = TRUE)
+    size = as.numeric(size)/1e6
+    size_mega <- c(size_mega, size)}
+size_mega}
+```
+#To retrieve the MBS for each SRA in a new column
+```{r}
+df$MBS=getSize(df$SRA)
+```
+#Normalize using the size of each SRA, this is only one way to do it and normalizes only between samples
+```{r}
+df$count=(df$freq*mean(df$MBS)/df$MBS)
+```
+#Here I transform the numbers using log10 because the variance is high
+```{r}
+df$trans_count=log10(df$count)
+```
+#Plotting boxplot of all SRAs
+```{r}
+g = ggplot(df, aes(reference.acc., trans_count))
+g + geom_boxplot() + guides(fill=FALSE) + labs(x="Female Gut Metagenome",y="log10 of Beta-Glucuronidase Hits") +
+theme_classic(base_size = 20) + geom_point()
+```
+<img src="./output_example.png">
+
+#Here is a very good tutorial to follow depnding on the data you have and if you have multiple groups http://r-statistics.co/Top50-Ggplot2-Visualizations-MasterList-R-Code.html

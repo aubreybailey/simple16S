@@ -1,0 +1,20 @@
+16S simple magic
+
+only do biological replicates!
+
+http://www.ibi.vu.nl/programs/taxmanwww/
+	>Illumina_V1V2_27F
+	AGAGTTTGATCCTGGCTCAG
+	#AGAGTTTGATYMTGGCTCAG should use this instead
+	>Illumina_BSR338R
+	TGCTGCCTCCCGTAGGAGT
+download
+gunzip ~/Downloads/amplicons_sum.fasta.gz
+mv ~/Downloads/amplicons_sum.fasta ./silva_v1v2.fasta 
+makeblastdb -in silva_v1v2.fasta -title silva_v1v2_db -dbtype nucl
+
+ls *.fastq | paste -s -d ',' : - |xargs -I{} magicblast -db silva_v1v2.fasta -paired -num_threads 3
+ -outfmt tabular -reftype genome -splice F -perc_identity 97 -paired -score 50 -in {} > all_samples.txt
+
+	taxonomy map not needed - we do this in R
+deseq

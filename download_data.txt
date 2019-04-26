@@ -1,0 +1,11 @@
+NCBI SRA: SRP145348
+https://www.ncbi.nlm.nih.gov/Traces/study/?acc=SRP145348
+ checkbox for hypervariable_region - V1-V2
+download SRR_Acc_List.txt
+
+prefetch --option-file SRR_Acc_List.txt	-O ./data_files
+
+fastq-dump --split-files --gzip data_files/*.sra
+
+extract accessions and names from SRARunTable.txt
+./rename.sh
